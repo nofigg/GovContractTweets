@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 import logging
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(filename='logs/contract_tweets.log', level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Load environment variables
 load_dotenv()
@@ -50,11 +50,13 @@ def fetch_sam_contracts():
     }
 
     try:
+        logging.info('Fetching new contract opportunities from SAM.gov')
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
+        logging.info('Received response from SAM.gov API')
         return response.json()['opportunityData']
     except Exception as e:
-        logger.error(f"Error fetching contracts: {str(e)}")
+        logging.error('Error fetching contracts: %s', e)
         return []
 
 def setup_twitter():
@@ -77,11 +79,12 @@ Deadline: {contract['due_date']}
 More info: {contract['url']}"""
 
     try:
+        logging.info('Posting tweet: %s', tweet_text)
         twitter_api.update_status(tweet_text)
-        logger.info(f"Successfully tweeted contract: {contract['title']}")
+        logging.info('Posted tweet: %s', tweet_text)
         return True
     except Exception as e:
-        logger.error(f"Error posting tweet: {str(e)}")
+        logging.error('Error posting tweet: %s', e)
         return False
 
 def main():
