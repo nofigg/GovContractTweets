@@ -197,7 +197,7 @@ def rank_contracts(contracts):
                     days_until_due = (deadline - now).days
                 except ValueError:
                     logging.warning(f"Could not parse deadline: {deadline_str}")
-            
+
             # Skip if deadline has passed
             if days_until_due is not None and days_until_due < 0:
                 continue
@@ -230,9 +230,9 @@ def rank_contracts(contracts):
             contract_id = contract.get('id') or contract.get('noticeId') or f"{contract['title']}_{deadline.strftime('%Y%m%d')}"
             
             # Format deadline for display
-            deadline_display = 'TBD'
+            deadline_display = 'Pending'
             if deadline:
-                deadline_display = deadline.strftime('%Y-%m-%d %H:%M %Z')
+                deadline_display = deadline.strftime('%B %d, %Y, %I:%M %p %Z')
             
             # Format value for display
             value_display = 'Pending Award Estimate'
