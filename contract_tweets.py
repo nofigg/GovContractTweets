@@ -18,19 +18,28 @@ def setup_database():
     """Create SQLite database and contracts table if they don't exist."""
     conn = sqlite3.connect('contracts.db')
     c = conn.cursor()
+    
+    # Drop existing table to update schema
+    c.execute('DROP TABLE IF EXISTS contracts')
+    
     c.execute('''
-        CREATE TABLE IF NOT EXISTS contracts
-        (notice_id TEXT PRIMARY KEY,
-         title TEXT,
-         due_date TEXT,
-         url TEXT,
-         posted_to_twitter INTEGER DEFAULT 0)
+        CREATE TABLE IF NOT EXISTS contracts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contract_id TEXT UNIQUE,
+            title TEXT,
+            posted_at TEXT,
+            value REAL,
+            score REAL,
+            agency TEXT,
+            due_date TEXT,
+            url TEXT
+        )
     ''')
     conn.commit()
     return conn
 
 def fetch_sam_contracts():
-    """Fetch today's contract opportunities from SAM.gov API."""
+    """Fetch and filter contract opportunities from SAM.gov API."""
     api_key = os.getenv('SAM_API_KEY')
     if not api_key:
         raise ValueError("SAM API key not found in environment variables")
@@ -42,12 +51,13 @@ def fetch_sam_contracts():
         'Content-Type': 'application/json'
     }
 
-    # SAM.gov API endpoint (you'll need to verify the exact endpoint and parameters)
     url = "https://api.sam.gov/opportunities/v2/search"
     params = {
         'postedFrom': today,
-        'postedTo': today,
-        'limit': 100
+        'limit': 10,  # Fetch top 10 contracts
+        'sortBy': 'relevance',
+        'setAside': ['SBA', 'SDVOSB', '8A', 'HubZone', 'VOSB'],  # Small business set-asides
+        'active': 'true'
     }
 
     try:
@@ -59,6 +69,36 @@ def fetch_sam_contracts():
     except Exception as e:
         logging.error('Error fetching contracts: %s', e)
         return []
+
+def rank_contracts(contracts):
+    """Rank contracts based on value, deadline, and small business relevance."""
+    valid_contracts = []
+    
+    for contract in contracts:
+        # Skip contracts without required information
+        if not all(k in contract for k in ['title', 'dueDate', 'value', 'agency']):
+            continue
+            
+        # Convert contract value to float
+        try:
+            value = float(contract['value'])
+        except (ValueError, TypeError):
+            value = 0.0
+            
+        # Calculate days until deadline
+        try:
+            due_date = datetime.strptime(contract['dueDate'], '%Y-%m-%d')
+            days_until_due = (due_date - datetime.now()).days
+        except (ValueError, TypeError):
+            days_until_due = float('inf')
+            
+        # Add ranking score
+        contract['score'] = value / (days_until_due + 1)  # Avoid division by zero
+        valid_contracts.append(contract)
+    
+    # Sort by score (descending)
+    ranked_contracts = sorted(valid_contracts, key=lambda x: x['score'], reverse=True)
+    return ranked_contracts[:5]  # Return top 5 contracts
 
 def setup_twitter():
     """Initialize Twitter API client with error handling and verification."""
@@ -80,18 +120,43 @@ def setup_twitter():
         raise
 
 def format_tweet(contract):
-    """Format contract details into a tweet under 280 characters."""
+    """Format contract details into an engaging tweet under 280 characters."""
+    # Format contract value
+    value = float(contract.get('value', 0))
+    if value >= 1_000_000:
+        value_str = f"${value/1_000_000:.1f}M"
+    else:
+        value_str = f"${value/1_000:.0f}K"
+
+    # Format deadline
+    due_date = datetime.strptime(contract['dueDate'], '%Y-%m-%d')
+    days_until_due = (due_date - datetime.now()).days
+    if days_until_due <= 7:
+        deadline_str = f"⚠️ DUE SOON: {due_date.strftime('%b %d')}"
+    else:
+        deadline_str = f"Due: {due_date.strftime('%b %d')}"
+
+    # Truncate title if needed
     title = contract['title']
-    if len(title) > 150:  # Leave room for other content
-        title = title[:147] + '...'
-    
-    tweet_text = f"NEW CONTRACT ALERT\n{title}\nDeadline: {contract['due_date']}"
-    
-    # Add URL if there's room
-    if len(tweet_text) + len(contract['url']) + 2 <= 280:
-        tweet_text += f"\n{contract['url']}"
-    
-    return tweet_text
+    if len(title) > 100:
+        title = title[:97] + '...'
+
+    # Create tweet with emojis and hashtags
+    tweet = (
+        f"🚨 NEW FEDERAL CONTRACT\n\n"
+        f"📋 {title}\n"
+        f"💰 {value_str}\n"
+        f"⏳ {deadline_str}\n"
+        f"🏢 {contract['agency']}\n"
+        f"🔗 {contract['url']}\n\n"
+        f"#GovContracts #SmallBiz"
+    )
+
+    # Ensure tweet is within character limit
+    if len(tweet) > 280:
+        tweet = tweet[:277] + '...'
+
+    return tweet
 
 def post_contract_tweet(twitter_api, contract):
     """Post a contract opportunity to Twitter with retries."""
@@ -115,43 +180,68 @@ def post_contract_tweet(twitter_api, contract):
                 return False
 
 def main():
-    """Main function to fetch contracts and post to Twitter."""
-    conn = setup_database()
-    twitter_api = setup_twitter()
-    
-    # Fetch new contracts
-    contracts = fetch_sam_contracts()
-    
-    for contract in contracts:
+    """Main function to fetch, rank, and post top contracts to Twitter."""
+    conn = None
+    try:
+        conn = setup_database()
+        twitter_api = setup_twitter()
+        
+        # Fetch and rank contracts
+        logging.info('Fetching contracts from SAM.gov')
+        contracts = fetch_sam_contracts()
+        
+        if not contracts:
+            logging.warning('No contracts found')
+            return
+            
+        logging.info('Ranking contracts')
+        ranked_contracts = rank_contracts(contracts)
+        
+        if not ranked_contracts:
+            logging.warning('No valid contracts after ranking')
+            return
+            
+        logging.info('Found %d ranked contracts', len(ranked_contracts))
+        
+        # Process each ranked contract
         cursor = conn.cursor()
+        for contract in ranked_contracts:
+            try:
+                # Check if contract already exists
+                cursor.execute('SELECT id FROM contracts WHERE contract_id = ?', (contract['id'],))
+                if cursor.fetchone() is not None:
+                    logging.info('Contract %s already posted', contract['id'])
+                    continue
+                
+                # Post tweet
+                if post_contract_tweet(twitter_api, contract):
+                    # Save contract to database
+                    cursor.execute(
+                        'INSERT INTO contracts (contract_id, title, posted_at, value, score) VALUES (?, ?, ?, ?, ?)',
+                        (contract['id'], contract['title'], datetime.now().isoformat(), 
+                         contract.get('value', 0), contract.get('score', 0))
+                    )
+                    conn.commit()
+                    logging.info('Contract %s saved to database', contract['id'])
+                    
+                    # Wait between tweets to avoid rate limits
+                    time.sleep(5)
+            except Exception as e:
+                logging.error('Error processing contract %s: %s', contract.get('id'), str(e))
+                continue
+                
+        logging.info('Finished processing contracts')
         
-        # Check if contract already exists
-        cursor.execute('SELECT * FROM contracts WHERE notice_id = ?', 
-                      (contract['notice_id'],))
-        
-        if not cursor.fetchone():
-            # Store new contract
-            cursor.execute('''
-                INSERT INTO contracts (notice_id, title, due_date, url)
-                VALUES (?, ?, ?, ?)
-            ''', (
-                contract['notice_id'],
-                contract['title'],
-                contract['due_date'],
-                contract['url']
-            ))
-            
-            # Post to Twitter
-            if post_contract_tweet(twitter_api, contract):
-                cursor.execute('''
-                    UPDATE contracts 
-                    SET posted_to_twitter = 1 
-                    WHERE notice_id = ?
-                ''', (contract['notice_id'],))
-            
-            conn.commit()
-    
-    conn.close()
+    except Exception as e:
+        logging.error('Error in main function: %s', str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+
+
+
 
 if __name__ == "__main__":
     main()
