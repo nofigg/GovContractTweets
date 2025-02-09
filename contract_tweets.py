@@ -82,8 +82,16 @@ def fetch_sam_contracts():
         logging.info('SAM.gov API Response Status: %d', response.status_code)
         logging.info('SAM.gov API Response Headers: %s', response.headers)
         
-        response.raise_for_status()
-        data = response.json()
+        if response.status_code != 200:
+            logging.error('SAM.gov API Error Response: %s', response.text)
+            return []
+            
+        try:
+            data = response.json()
+            logging.debug('SAM.gov API Response Data: %s', data)
+        except ValueError as e:
+            logging.error('Error parsing SAM.gov API response: %s', str(e))
+            return []
         
         if 'opportunitiesData' in data:
             opportunities = data['opportunitiesData']
@@ -155,11 +163,14 @@ def rank_contracts(contracts):
             
             final_score = base_score + set_aside_bonus
             
+            # Generate a unique ID from title and date if no ID exists
+            contract_id = contract.get('id') or contract.get('noticeId') or f"{contract['title']}_{deadline.strftime('%Y%m%d')}"
+            
             valid_contracts.append({
-                'id': contract['id'],
+                'id': contract_id,
                 'title': contract['title'],
                 'deadline': deadline.strftime('%Y-%m-%d %H:%M %Z'),
-                'agency': contract['fullParentPathName'].split('.')[1],
+                'agency': contract['fullParentPathName'].split('.')[-1],  # Take last part of path
                 'url': contract['uiLink'],
                 'set_aside': contract.get('typeOfSetAsideDescription', 'Small Business'),
                 'score': final_score
@@ -168,6 +179,7 @@ def rank_contracts(contracts):
         except (ValueError, KeyError) as e:
             logging.warning('Error processing contract %s: %s', 
                           contract.get('title', 'Unknown'), str(e))
+            logging.debug('Contract data: %s', contract)
             continue
     
     if not valid_contracts:
