@@ -4,6 +4,8 @@ import requests
 import tweepy
 import time
 from datetime import datetime, timedelta
+from datetime import timezone, tzinfo
+import pytz
 from dotenv import load_dotenv
 import logging
 
@@ -44,8 +46,8 @@ def fetch_sam_contracts():
     if not api_key:
         raise ValueError("SAM API key not found in environment variables")
 
-    # Get date range for the last 24 hours
-    end_date = datetime.now()
+    # Get date range for the last 24 hours in UTC
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=1)
     
     # Format dates as MM/dd/yyyy for SAM.gov API
@@ -114,7 +116,7 @@ def fetch_sam_contracts():
 def rank_contracts(contracts):
     """Rank contracts based on response deadline and small business relevance."""
     valid_contracts = []
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     
     for contract in contracts:
         try:
@@ -125,6 +127,12 @@ def rank_contracts(contracts):
                 
             # Convert deadline to datetime (format: 2025-02-17T13:00:00-07:00)
             deadline = datetime.fromisoformat(deadline_str)
+            # Convert to UTC for comparison
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            else:
+                deadline = deadline.astimezone(timezone.utc)
+                
             days_until_due = (deadline - now).days
             
             # Skip if deadline has passed
