@@ -10,8 +10,15 @@ from dotenv import load_dotenv
 import logging
 
 # Set up logging
-logging.basicConfig(filename='logs/contract_tweets.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+os.makedirs('logs', exist_ok=True)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/contract_tweets.log'),
+        logging.StreamHandler()
+    ]
+)
 
 # Load environment variables
 load_dotenv()
@@ -105,14 +112,20 @@ def fetch_sam_contracts():
                 if not opportunities:
                     break
                     
+                # Log raw opportunity data for debugging
+                logging.debug('Raw opportunities data: %s', opportunities)
+                
                 # Filter for relevant opportunities
-                filtered_opportunities = [
-                    opp for opp in opportunities
-                    if opp['active'] == 'Yes' and
-                    opp['type'] not in ['Award Notice'] and  # Exclude already awarded contracts
-                    any(setaside in ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB', 'WOSB']
-                        for setaside in ([opp.get('typeOfSetAside')] if opp.get('typeOfSetAside') else []))
-                ]
+                filtered_opportunities = []
+                for opp in opportunities:
+                    logging.debug('Processing opportunity: %s', opp)
+                    
+                    if opp.get('active') == 'Yes' and \
+                       opp.get('type') not in ['Award Notice'] and \
+                       any(setaside in ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB', 'WOSB']
+                           for setaside in ([opp.get('typeOfSetAside')] if opp.get('typeOfSetAside') else [])):
+                        filtered_opportunities.append(opp)
+                        logging.debug('Added opportunity to filtered list: %s', opp.get('title'))
                 
                 all_opportunities.extend(filtered_opportunities)
                 total_fetched += len(opportunities)
@@ -146,66 +159,96 @@ def fetch_sam_contracts():
         return []
 
 def rank_contracts(contracts):
-    """Rank contracts based on response deadline and small business relevance."""
+    """Rank contracts based on value, deadline, and small business relevance."""
     valid_contracts = []
     now = datetime.now(timezone.utc)
     
     for contract in contracts:
         try:
+            # Get contract value (try multiple sources)
+            value = None
+            if contract.get('award') and contract['award'].get('amount'):
+                value = float(contract['award']['amount'])
+            elif contract.get('fundingCeiling'):
+                value = float(contract['fundingCeiling'])
+            elif contract.get('estimatedTotalContractValue'):
+                value = float(contract['estimatedTotalContractValue'])
+            
             # Parse response deadline
             deadline_str = contract.get('responseDeadLine')
-            if not deadline_str:
-                continue
-                
-            # Convert deadline to datetime (format: 2025-02-17T13:00:00-07:00)
-            deadline = datetime.fromisoformat(deadline_str)
-            # Convert to UTC for comparison
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
-            else:
-                deadline = deadline.astimezone(timezone.utc)
-                
-            days_until_due = (deadline - now).days
+            deadline = None
+            days_until_due = None
+            if deadline_str:
+                try:
+                    deadline = datetime.fromisoformat(deadline_str)
+                    if deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=timezone.utc)
+                    else:
+                        deadline = deadline.astimezone(timezone.utc)
+                    days_until_due = (deadline - now).days
+                except ValueError:
+                    logging.warning(f"Could not parse deadline: {deadline_str}")
             
             # Skip if deadline has passed
-            if days_until_due < 0:
+            if days_until_due is not None and days_until_due < 0:
                 continue
             
-            # Base score from urgency (0-50 points)
-            urgency_score = 50 * (1 - (days_until_due / 30))  # Linear scale over 30 days
-            urgency_score = max(0, min(50, urgency_score))  # Clamp between 0-50
+            # Value score (0-50 points) - Now weighted more heavily
+            value_score = 0
+            if value:
+                value_score = min(50, value / 100000)  # 0.5 point per $100k up to 50 points
             
-            # Set-aside score (0-30 points)
+            # Urgency score (0-30 points) - Still important but less weight
+            urgency_score = 0
+            if days_until_due is not None:
+                urgency_score = 30 * (1 - (days_until_due / 30))  # Linear scale over 30 days
+                urgency_score = max(0, min(30, urgency_score))
+            
+            # Set-aside score (0-20 points) - Adjusted weights
             set_aside = contract.get('typeOfSetAside', '')
             set_aside_score = {
-                'SDVOSB': 30,  # Service Disabled Veteran Owned
-                'WOSB': 30,   # Women Owned
-                '8A': 25,     # 8(a) Program
-                'HUBZone': 20,# HUBZone
-                'VOSB': 20,   # Veteran Owned
-                'SBA': 15     # Small Business
+                'SDVOSB': 20,  # Service Disabled Veteran Owned
+                'WOSB': 20,   # Women Owned
+                '8A': 15,     # 8(a) Program
+                'HUBZone': 15,# HUBZone
+                'VOSB': 15,   # Veteran Owned
+                'SBA': 10     # Small Business
             }.get(set_aside, 0)
             
-            # Value score (0-20 points)
-            try:
-                value = float(contract.get('estimatedTotalContractValue', 0))
-                value_score = min(20, value / 100000)  # 1 point per $100k up to 20 points
-            except (ValueError, TypeError):
-                value_score = 0
-            
-            final_score = urgency_score + set_aside_score + value_score
+            final_score = value_score + urgency_score + set_aside_score
             
             # Generate a unique ID from title and date if no ID exists
             contract_id = contract.get('id') or contract.get('noticeId') or f"{contract['title']}_{deadline.strftime('%Y%m%d')}"
             
+            # Format deadline for display
+            deadline_display = 'TBD'
+            if deadline:
+                deadline_display = deadline.strftime('%Y-%m-%d %H:%M %Z')
+            
+            # Format value for display
+            value_display = 'TBD'
+            if value:
+                value_display = '${:,.2f}'.format(value)
+            
+            # Get set-aside description
+            set_aside_desc = contract.get('typeOfSetAsideDescription') or contract.get('typeOfSetAside', 'TBD')
+            if set_aside_desc == '':
+                set_aside_desc = 'TBD'
+            
+            # Get agency name
+            agency_path = contract.get('fullParentPathName', '').split('.')
+            agency = agency_path[-1] if agency_path else 'TBD'
+            
             valid_contracts.append({
-                'id': contract_id,
+                'id': contract.get('noticeId', f"{contract['title']}_{int(time.time())}"),
                 'title': contract['title'],
-                'deadline': deadline.strftime('%Y-%m-%d %H:%M %Z'),
-                'agency': contract['fullParentPathName'].split('.')[-1],  # Take last part of path
-                'url': contract['uiLink'],
-                'set_aside': contract.get('typeOfSetAsideDescription', 'Small Business'),
-                'score': final_score
+                'deadline': deadline_display,
+                'agency': agency,
+                'url': contract.get('uiLink', ''),
+                'set_aside': set_aside_desc,
+                'value': value_display,
+                'score': final_score,
+                'value_raw': value or 0  # Store raw value for sorting
             })
             
         except (ValueError, KeyError) as e:
@@ -314,12 +357,8 @@ def post_contract_tweet(twitter_client, contract):
                 return False
 
 def main():
-    """Main function to fetch, rank, and post top contracts to Twitter."""
-    conn = None
+    """Main function to fetch and rank contracts (without posting to Twitter)."""
     try:
-        conn = setup_database()
-        twitter_client = setup_twitter()
-        
         # Fetch and rank contracts
         logging.info('Fetching contracts from SAM.gov')
         contracts = fetch_sam_contracts()
@@ -327,59 +366,92 @@ def main():
         if not contracts:
             logging.warning('No contracts found')
             return
-            
+        
+        # Rank contracts
         logging.info('Ranking contracts')
         ranked_contracts = rank_contracts(contracts)
         
         if not ranked_contracts:
-            logging.warning('No valid contracts after ranking')
+            logging.warning('No contracts met ranking criteria')
             return
             
         logging.info('Found %d ranked contracts', len(ranked_contracts))
         
-        # Process each ranked contract
-        cursor = conn.cursor()
-        for contract in ranked_contracts:
-            try:
-                # Validate required fields
-                required_fields = ['id', 'title', 'agency', 'url', 'deadline', 'set_aside']
-                missing_fields = [field for field in required_fields if not contract.get(field)]
-                
-                if missing_fields:
-                    logging.error(f"Contract missing required fields: {', '.join(missing_fields)}")
-                    logging.debug(f"Contract data: {contract}")
-                    continue
-                
-                # Check if contract already exists
-                cursor.execute('SELECT id FROM contracts WHERE contract_id = ?', (contract['id'],))
-                if cursor.fetchone() is not None:
-                    logging.info('Contract %s already posted', contract['id'])
-                    continue
-                
-                # Post tweet
-                if post_contract_tweet(twitter_client, contract):
-                    # Save contract to database
-                    cursor.execute(
-                        'INSERT INTO contracts (contract_id, title, posted_at, value, score) VALUES (?, ?, ?, ?, ?)',
-                        (contract['id'], contract['title'], datetime.now().isoformat(), 
-                         contract.get('value', 0), contract.get('score', 0))
-                    )
-                    conn.commit()
-                    logging.info('Contract %s saved to database', contract['id'])
-                    
-                    # Wait between tweets to avoid rate limits
-                    time.sleep(5)
-            except Exception as e:
-                logging.error('Error processing contract %s: %s', contract.get('id'), str(e))
-                continue
-                
-        logging.info('Finished processing contracts')
-        
+        # Display top 5 contracts
+        logging.info('Top 5 Contracts:')
+        for i, contract in enumerate(ranked_contracts[:5], 1):
+            # Extract agency from fullParentPathName or department
+            agency_path = contract.get('fullParentPathName', '').split('/')
+            agency = agency_path[-1] if agency_path else contract.get('department', 'N/A')
+            
+            # Format response date
+            response_date = contract.get('responseDate')
+            if response_date:
+                try:
+                    date_obj = datetime.strptime(response_date, '%Y-%m-%dT%H:%M:%S.%f%z')
+                    formatted_date = date_obj.strftime('%Y-%m-%d %H:%M %Z')
+                except ValueError:
+                    formatted_date = response_date
+            else:
+                formatted_date = 'N/A'
+            
+            # Format contract value
+            value = contract.get('estimatedTotalContractValue')
+            if value:
+                try:
+                    value_float = float(value)
+                    formatted_value = '${:,.2f}'.format(value_float)
+                except ValueError:
+                    formatted_value = f'${value}'
+            else:
+                formatted_value = 'N/A'
+            
+            # Get set-aside description or type
+            set_aside = contract.get('typeOfSetAsideDescription') or contract.get('typeOfSetAside', 'None')
+            
+            # Get contract value
+            value = contract.get('estimatedTotalContractValue')
+            if not value and contract.get('award'):
+                value = contract['award'].get('amount')
+            if value:
+                try:
+                    value_float = float(value)
+                    formatted_value = '${:,.2f}'.format(value_float)
+                except ValueError:
+                    formatted_value = f'${value}'
+            else:
+                formatted_value = 'N/A'
+            
+            # Format response date
+            response_date = contract.get('responseDeadLine')
+            if response_date:
+                try:
+                    date_obj = datetime.strptime(response_date, '%Y-%m-%dT%H:%M:%S%z')
+                    formatted_date = date_obj.strftime('%Y-%m-%d %H:%M %Z')
+                except ValueError:
+                    formatted_date = response_date
+            else:
+                formatted_date = 'N/A'
+            
+            # Get agency name
+            agency_path = contract.get('fullParentPathName', '').split('.')
+            agency = agency_path[-1] if agency_path else contract.get('department', 'N/A')
+            
+            # Get notice ID
+            notice_id = contract.get('noticeId', 'N/A')
+            
+            logging.info('\n%d. %s', i, contract['title'])
+            logging.info('   💰 Contract Value: %s', contract['value'])
+            logging.info('   📅 Response Due: %s', contract['deadline'])
+            logging.info('   🏢 Agency: %s', contract['agency'])
+            logging.info('   🎯 Set-Aside: %s', contract['set_aside'])
+            logging.info('   📊 Score: %.2f', contract['score'])
+            logging.info('   🔗 URL: %s', contract['url'])
+            
     except Exception as e:
         logging.error('Error in main function: %s', str(e))
     finally:
-        if conn:
-            conn.close()
+        logging.info('Finished processing contracts')
 
 
 
