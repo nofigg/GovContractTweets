@@ -64,53 +64,77 @@ def fetch_sam_contracts():
         'api_version': 'v2',
         'postedFrom': posted_from,
         'postedTo': posted_to,
-        'limit': 10,
+        'limit': 100,  # Maximum allowed per page
+        'offset': 0,
         'sortBy': 'relevance',
-        'setAsideType': ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB'],
+        'setAsideType': ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB', 'WOSB'],
         'active': 'true',
-        'responseFormat': 'json'
+        'responseFormat': 'json',
+        'status': 'active',
+        'type': ['o', 'p', 'k'],  # Opportunity, Presolicitation, Combined
+        'excludeFields': ['description', 'award']  # Reduce response size
     }
     
     logging.info('Searching for contracts between %s and %s', 
                  posted_from, posted_to)
 
     try:
-        logging.info('Fetching new contract opportunities from SAM.gov')
-        response = requests.get(url, headers=headers, params=params)
+        all_opportunities = []
+        total_fetched = 0
+        max_results = 1000  # Set a reasonable limit
         
-        # Log response details for debugging
-        logging.info('SAM.gov API Response Status: %d', response.status_code)
-        logging.info('SAM.gov API Response Headers: %s', response.headers)
+        while total_fetched < max_results:
+            logging.info('Fetching page %d of contract opportunities from SAM.gov', (total_fetched // 100) + 1)
+            params['offset'] = total_fetched
+            
+            response = requests.get(url, headers=headers, params=params)
+            
+            # Log response details for debugging
+            logging.info('SAM.gov API Response Status: %d', response.status_code)
+            
+            if response.status_code != 200:
+                logging.error('SAM.gov API Error Response: %s', response.text)
+                break
+                
+            try:
+                data = response.json()
+                if 'opportunitiesData' not in data:
+                    break
+                    
+                opportunities = data['opportunitiesData']
+                if not opportunities:
+                    break
+                    
+                # Filter for relevant opportunities
+                filtered_opportunities = [
+                    opp for opp in opportunities
+                    if opp['active'] == 'Yes' and
+                    opp['type'] not in ['Award Notice'] and  # Exclude already awarded contracts
+                    any(setaside in ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB', 'WOSB']
+                        for setaside in ([opp.get('typeOfSetAside')] if opp.get('typeOfSetAside') else []))
+                ]
+                
+                all_opportunities.extend(filtered_opportunities)
+                total_fetched += len(opportunities)
+                
+                logging.info('Fetched %d opportunities, %d relevant (total: %d, relevant: %d)', 
+                             len(opportunities), len(filtered_opportunities), 
+                             total_fetched, len(all_opportunities))
+                
+                # If we got less than the limit, we've reached the end
+                if len(opportunities) < params['limit']:
+                    break
+                    
+                # Rate limiting
+                time.sleep(1)
+                
+            except ValueError as e:
+                logging.error('Error parsing SAM.gov API response: %s', str(e))
+                break
         
-        if response.status_code != 200:
-            logging.error('SAM.gov API Error Response: %s', response.text)
-            return []
-            
-        try:
-            data = response.json()
-            logging.debug('SAM.gov API Response Data: %s', data)
-        except ValueError as e:
-            logging.error('Error parsing SAM.gov API response: %s', str(e))
-            return []
-        
-        if 'opportunitiesData' in data:
-            opportunities = data['opportunitiesData']
-            logging.info('Found %d total contract opportunities', len(opportunities))
-            
-            # Filter for relevant opportunities
-            filtered_opportunities = [
-                opp for opp in opportunities
-                if opp['active'] == 'Yes' and
-                opp['type'] not in ['Award Notice'] and  # Exclude already awarded contracts
-                any(setaside in ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB', 'WOSB']
-                    for setaside in ([opp.get('typeOfSetAside')] if opp.get('typeOfSetAside') else []))
-            ]
-            
-            logging.info('Found %d relevant small business opportunities', len(filtered_opportunities))
-            return filtered_opportunities
-        else:
-            logging.warning('No opportunities found in response')
-            return []
+        logging.info('Found %d total contract opportunities', total_fetched)
+        logging.info('Found %d relevant small business opportunities', len(all_opportunities))
+        return all_opportunities
             
     except requests.exceptions.RequestException as e:
         logging.error('Error fetching contracts: %s', str(e))
@@ -147,21 +171,29 @@ def rank_contracts(contracts):
             if days_until_due < 0:
                 continue
             
-            # Calculate base score (prioritize urgency)
-            base_score = 100 / (days_until_due + 1)  # Add 1 to avoid division by zero
+            # Base score from urgency (0-50 points)
+            urgency_score = 50 * (1 - (days_until_due / 30))  # Linear scale over 30 days
+            urgency_score = max(0, min(50, urgency_score))  # Clamp between 0-50
             
-            # Bonus points for specific set-asides
+            # Set-aside score (0-30 points)
             set_aside = contract.get('typeOfSetAside', '')
-            set_aside_bonus = {
-                'SDVOSB': 50,  # Service Disabled Veteran Owned
-                'WOSB': 40,   # Women Owned
-                '8A': 30,     # 8(a) Program
+            set_aside_score = {
+                'SDVOSB': 30,  # Service Disabled Veteran Owned
+                'WOSB': 30,   # Women Owned
+                '8A': 25,     # 8(a) Program
                 'HUBZone': 20,# HUBZone
                 'VOSB': 20,   # Veteran Owned
-                'SBA': 10     # Small Business
+                'SBA': 15     # Small Business
             }.get(set_aside, 0)
             
-            final_score = base_score + set_aside_bonus
+            # Value score (0-20 points)
+            try:
+                value = float(contract.get('estimatedTotalContractValue', 0))
+                value_score = min(20, value / 100000)  # 1 point per $100k up to 20 points
+            except (ValueError, TypeError):
+                value_score = 0
+            
+            final_score = urgency_score + set_aside_score + value_score
             
             # Generate a unique ID from title and date if no ID exists
             contract_id = contract.get('id') or contract.get('noticeId') or f"{contract['title']}_{deadline.strftime('%Y%m%d')}"
