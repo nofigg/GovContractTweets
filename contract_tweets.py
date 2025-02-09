@@ -156,6 +156,7 @@ def rank_contracts(contracts):
             final_score = base_score + set_aside_bonus
             
             valid_contracts.append({
+                'id': contract['id'],
                 'title': contract['title'],
                 'deadline': deadline.strftime('%Y-%m-%d %H:%M %Z'),
                 'agency': contract['fullParentPathName'].split('.')[1],
@@ -292,6 +293,15 @@ def main():
         cursor = conn.cursor()
         for contract in ranked_contracts:
             try:
+                # Validate required fields
+                required_fields = ['id', 'title', 'agency', 'url', 'deadline', 'set_aside']
+                missing_fields = [field for field in required_fields if not contract.get(field)]
+                
+                if missing_fields:
+                    logging.error(f"Contract missing required fields: {', '.join(missing_fields)}")
+                    logging.debug(f"Contract data: {contract}")
+                    continue
+                
                 # Check if contract already exists
                 cursor.execute('SELECT id FROM contracts WHERE contract_id = ?', (contract['id'],))
                 if cursor.fetchone() is not None:
