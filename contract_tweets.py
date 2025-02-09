@@ -165,14 +165,23 @@ def rank_contracts(contracts):
     
     for contract in contracts:
         try:
+            # Track missing fields for debugging
+            missing_fields = []
+            
             # Get contract value (try multiple sources)
             value = None
             if contract.get('award') and contract['award'].get('amount'):
                 value = float(contract['award']['amount'])
+                logging.debug(f"Using award.amount: ${value:,.2f}")
             elif contract.get('fundingCeiling'):
                 value = float(contract['fundingCeiling'])
+                logging.debug(f"Using fundingCeiling: ${value:,.2f}")
             elif contract.get('estimatedTotalContractValue'):
                 value = float(contract['estimatedTotalContractValue'])
+                logging.debug(f"Using estimatedTotalContractValue: ${value:,.2f}")
+            else:
+                missing_fields.append('contract_value')
+                logging.debug("No contract value found in any field")
             
             # Parse response deadline
             deadline_str = contract.get('responseDeadLine')
@@ -226,19 +235,44 @@ def rank_contracts(contracts):
                 deadline_display = deadline.strftime('%Y-%m-%d %H:%M %Z')
             
             # Format value for display
-            value_display = 'TBD'
+            value_display = 'Pending Award Estimate'
             if value:
                 value_display = '${:,.2f}'.format(value)
             
             # Get set-aside description
-            set_aside_desc = contract.get('typeOfSetAsideDescription') or contract.get('typeOfSetAside', 'TBD')
+            set_aside_desc = contract.get('typeOfSetAsideDescription') or contract.get('typeOfSetAside', 'Open Competition')
             if set_aside_desc == '':
-                set_aside_desc = 'TBD'
+                set_aside_desc = 'Open Competition'
+                missing_fields.append('set_aside')
             
             # Get agency name
             agency_path = contract.get('fullParentPathName', '').split('.')
-            agency = agency_path[-1] if agency_path else 'TBD'
+            agency = agency_path[-1] if agency_path else 'Federal Government'
+            if not agency_path:
+                missing_fields.append('agency')
+                
+            # Get NAICS code
+            naics_code = contract.get('naicsCode', 'Not Specified')
+            if not naics_code:
+                missing_fields.append('naics_code')
+                
+            # Get place of performance
+            pop = contract.get('placeOfPerformance', {})
+            location = 'Multiple Locations'
+            if pop:
+                state = pop.get('state', '')
+                city = pop.get('city', '')
+                if city and state:
+                    location = f"{city}, {state}"
+                elif state:
+                    location = state
+            else:
+                missing_fields.append('place_of_performance')
             
+            # Log any missing fields
+            if missing_fields:
+                logging.warning(f"Missing fields for contract {contract.get('noticeId', 'Unknown')}: {', '.join(missing_fields)}")
+
             valid_contracts.append({
                 'id': contract.get('noticeId', f"{contract['title']}_{int(time.time())}"),
                 'title': contract['title'],
@@ -247,8 +281,11 @@ def rank_contracts(contracts):
                 'url': contract.get('uiLink', ''),
                 'set_aside': set_aside_desc,
                 'value': value_display,
+                'naics': naics_code,
+                'location': location,
                 'score': final_score,
-                'value_raw': value or 0  # Store raw value for sorting
+                'value_raw': value or 0,  # Store raw value for sorting
+                'missing_fields': missing_fields
             })
             
         except (ValueError, KeyError) as e:
