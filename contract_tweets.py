@@ -192,20 +192,19 @@ def rank_contracts(contracts):
     return ranked_contracts[:5]  # Return top 5 contracts
 
 def setup_twitter():
-    """Initialize Twitter API client with error handling and verification."""
+    """Initialize Twitter API v2 client with error handling and verification."""
     try:
-        auth = tweepy.OAuth1UserHandler(
-            os.getenv('TWITTER_API_KEY'),
-            os.getenv('TWITTER_API_SECRET'),
-            os.getenv('TWITTER_ACCESS_TOKEN'),
-            os.getenv('TWITTER_ACCESS_SECRET')
+        client = tweepy.Client(
+            consumer_key=os.getenv('TWITTER_API_KEY'),
+            consumer_secret=os.getenv('TWITTER_API_SECRET'),
+            access_token=os.getenv('TWITTER_ACCESS_TOKEN'),
+            access_token_secret=os.getenv('TWITTER_ACCESS_SECRET')
         )
-        api = tweepy.API(auth)
         
-        # Verify credentials
-        api.verify_credentials()
+        # Test the client by getting the authenticated user
+        client.get_me()
         logging.info('✅ Twitter authentication successful!')
-        return api
+        return client
     except Exception as e:
         logging.error('❌ Twitter authentication failed: %s', str(e))
         raise
@@ -256,7 +255,7 @@ def format_tweet(contract):
     
     return tweet
 
-def post_contract_tweet(twitter_api, contract):
+def post_contract_tweet(twitter_client, contract):
     """Post a contract opportunity to Twitter with retries."""
     max_retries = 3
     retry_count = 0
@@ -265,9 +264,14 @@ def post_contract_tweet(twitter_api, contract):
         try:
             tweet_text = format_tweet(contract)
             logging.info('Attempting to post tweet: %s', tweet_text)
-            twitter_api.update_status(tweet_text)
-            logging.info('Successfully posted tweet')
-            return True
+            response = twitter_client.create_tweet(text=tweet_text)
+            
+            if response.data:
+                logging.info('Successfully posted tweet with ID: %s', response.data['id'])
+                return True
+            else:
+                raise Exception('No tweet data in response')
+                
         except Exception as e:
             retry_count += 1
             if retry_count < max_retries:
@@ -282,7 +286,7 @@ def main():
     conn = None
     try:
         conn = setup_database()
-        twitter_api = setup_twitter()
+        twitter_client = setup_twitter()
         
         # Fetch and rank contracts
         logging.info('Fetching contracts from SAM.gov')
@@ -321,7 +325,7 @@ def main():
                     continue
                 
                 # Post tweet
-                if post_contract_tweet(twitter_api, contract):
+                if post_contract_tweet(twitter_client, contract):
                     # Save contract to database
                     cursor.execute(
                         'INSERT INTO contracts (contract_id, title, posted_at, value, score) VALUES (?, ?, ?, ?, ?)',
