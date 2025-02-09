@@ -2,6 +2,7 @@ import os
 import sqlite3
 import requests
 import tweepy
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 import logging
@@ -60,32 +61,58 @@ def fetch_sam_contracts():
         return []
 
 def setup_twitter():
-    """Initialize Twitter API client."""
-    auth = tweepy.OAuthHandler(
-        os.getenv('TWITTER_API_KEY'),
-        os.getenv('TWITTER_API_SECRET')
-    )
-    auth.set_access_token(
-        os.getenv('TWITTER_ACCESS_TOKEN'),
-        os.getenv('TWITTER_ACCESS_SECRET')
-    )
-    return tweepy.API(auth)
+    """Initialize Twitter API client with error handling and verification."""
+    try:
+        auth = tweepy.OAuth1UserHandler(
+            os.getenv('TWITTER_API_KEY'),
+            os.getenv('TWITTER_API_SECRET'),
+            os.getenv('TWITTER_ACCESS_TOKEN'),
+            os.getenv('TWITTER_ACCESS_SECRET')
+        )
+        api = tweepy.API(auth)
+        
+        # Verify credentials
+        api.verify_credentials()
+        logging.info('✅ Twitter authentication successful!')
+        return api
+    except Exception as e:
+        logging.error('❌ Twitter authentication failed: %s', str(e))
+        raise
+
+def format_tweet(contract):
+    """Format contract details into a tweet under 280 characters."""
+    title = contract['title']
+    if len(title) > 150:  # Leave room for other content
+        title = title[:147] + '...'
+    
+    tweet_text = f"NEW CONTRACT ALERT\n{title}\nDeadline: {contract['due_date']}"
+    
+    # Add URL if there's room
+    if len(tweet_text) + len(contract['url']) + 2 <= 280:
+        tweet_text += f"\n{contract['url']}"
+    
+    return tweet_text
 
 def post_contract_tweet(twitter_api, contract):
-    """Post a contract opportunity to Twitter."""
-    tweet_text = f"""NEW CONTRACT ALERT 🚨
-{contract['title']}
-Deadline: {contract['due_date']}
-More info: {contract['url']}"""
-
-    try:
-        logging.info('Posting tweet: %s', tweet_text)
-        twitter_api.update_status(tweet_text)
-        logging.info('Posted tweet: %s', tweet_text)
-        return True
-    except Exception as e:
-        logging.error('Error posting tweet: %s', e)
-        return False
+    """Post a contract opportunity to Twitter with retries."""
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            tweet_text = format_tweet(contract)
+            logging.info('Attempting to post tweet: %s', tweet_text)
+            twitter_api.update_status(tweet_text)
+            logging.info('Successfully posted tweet')
+            return True
+        except Exception as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                logging.warning('Tweet attempt %d failed: %s. Retrying...', retry_count, str(e))
+                time.sleep(5)  # Wait 5 seconds before retrying
+            else:
+                logging.error('Failed to post tweet after %d attempts: %s', max_retries, str(e))
+                return False
 
 def main():
     """Main function to fetch contracts and post to Twitter."""
