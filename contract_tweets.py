@@ -48,6 +48,10 @@ def fetch_sam_contracts():
     end_date = datetime.now()
     start_date = end_date - timedelta(days=1)
     
+    # Format dates as MM/dd/yyyy for SAM.gov API
+    posted_from = start_date.strftime('%m/%d/%Y')
+    posted_to = end_date.strftime('%m/%d/%Y')
+    
     headers = {
         'X-Api-Key': api_key,
         'Content-Type': 'application/json'
@@ -56,8 +60,8 @@ def fetch_sam_contracts():
     url = "https://api.sam.gov/opportunities/v2/search"
     params = {
         'api_version': 'v2',
-        'postedFrom': start_date.strftime('%Y-%m-%d'),
-        'postedTo': end_date.strftime('%Y-%m-%d'),
+        'postedFrom': posted_from,
+        'postedTo': posted_to,
         'limit': 10,
         'sortBy': 'relevance',
         'setAsideType': ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB'],
@@ -66,7 +70,7 @@ def fetch_sam_contracts():
     }
     
     logging.info('Searching for contracts between %s and %s', 
-                 params['postedFrom'], params['postedTo'])
+                 posted_from, posted_to)
 
     try:
         logging.info('Fetching new contract opportunities from SAM.gov')
