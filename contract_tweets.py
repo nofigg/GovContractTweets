@@ -8,6 +8,9 @@ from datetime import timezone, tzinfo
 import pytz
 from dotenv import load_dotenv
 import logging
+import re
+from PyPDF2 import PdfReader
+from io import BytesIO
 
 # Set up logging
 os.makedirs('logs', exist_ok=True)
@@ -22,6 +25,43 @@ logging.basicConfig(
 
 # Load environment variables
 load_dotenv()
+
+def extract_value_from_pdf(pdf_url):
+    """Extract contract value from PDF attachment."""
+    try:
+        # Download PDF content
+        response = requests.get(pdf_url)
+        response.raise_for_status()
+        
+        # Read PDF content
+        pdf_reader = PdfReader(BytesIO(response.content))
+        text = ''
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+        
+        # Look for common value patterns
+        patterns = [
+            r'Total Value[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+            r'Estimated Cost[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+            r'Award Amount[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+            r'Total Cost[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+            r'Contract Value[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+            r'Base Value[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+            r'Total Contract Value[:\s]*\$?([\d,]+(?:\.\d{2})?)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                value_str = match.group(1).replace(',', '')
+                return float(value_str)
+        
+        logging.debug(f"No value pattern found in PDF: {pdf_url}")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Error extracting value from PDF {pdf_url}: {str(e)}")
+        return None
 
 def setup_database():
     """Create SQLite database and contracts table if they don't exist."""
@@ -170,18 +210,37 @@ def rank_contracts(contracts):
             
             # Get contract value (try multiple sources)
             value = None
+            value_source = None
+            
+            # Try API fields first
             if contract.get('award') and contract['award'].get('amount'):
                 value = float(contract['award']['amount'])
-                logging.debug(f"Using award.amount: ${value:,.2f}")
+                value_source = 'award.amount'
             elif contract.get('fundingCeiling'):
                 value = float(contract['fundingCeiling'])
-                logging.debug(f"Using fundingCeiling: ${value:,.2f}")
+                value_source = 'fundingCeiling'
             elif contract.get('estimatedTotalContractValue'):
                 value = float(contract['estimatedTotalContractValue'])
-                logging.debug(f"Using estimatedTotalContractValue: ${value:,.2f}")
+                value_source = 'estimatedTotalContractValue'
+            
+            # If no value found, try PDF attachments
+            if value is None:
+                attachments = contract.get('resourceLinks', [])
+                for attachment in attachments:
+                    if attachment.get('url', '').lower().endswith('.pdf'):
+                        pdf_value = extract_value_from_pdf(attachment['url'])
+                        if pdf_value:
+                            value = pdf_value
+                            value_source = 'PDF extraction'
+                            break
+            
+            # Log value source and handle missing values
+            if value is not None:
+                logging.info(f"Contract value (${value:,.2f}) found in {value_source}")
             else:
+                value = 'Est. Value: Pending Review'
                 missing_fields.append('contract_value')
-                logging.debug("No contract value found in any field")
+                logging.warning(f"No contract value found in API or PDFs - manual review needed for {contract.get('noticeId', 'Unknown')}")
             
             # Parse response deadline
             deadline_str = contract.get('responseDeadLine')
