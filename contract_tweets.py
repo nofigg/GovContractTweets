@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import tweepy
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import logging
 
@@ -44,7 +44,9 @@ def fetch_sam_contracts():
     if not api_key:
         raise ValueError("SAM API key not found in environment variables")
 
-    today = datetime.now().strftime('%Y-%m-%d')
+    # Get date range for the last 24 hours
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=1)
     
     headers = {
         'X-Api-Key': api_key,
@@ -54,13 +56,17 @@ def fetch_sam_contracts():
     url = "https://api.sam.gov/opportunities/v2/search"
     params = {
         'api_version': 'v2',
-        'postedFrom': today,
+        'postedFrom': start_date.strftime('%Y-%m-%d'),
+        'postedTo': end_date.strftime('%Y-%m-%d'),
         'limit': 10,
         'sortBy': 'relevance',
         'setAsideType': ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB'],
         'active': 'true',
         'responseFormat': 'json'
     }
+    
+    logging.info('Searching for contracts between %s and %s', 
+                 params['postedFrom'], params['postedTo'])
 
     try:
         logging.info('Fetching new contract opportunities from SAM.gov')
