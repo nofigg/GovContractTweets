@@ -47,27 +47,47 @@ def fetch_sam_contracts():
     today = datetime.now().strftime('%Y-%m-%d')
     
     headers = {
-        'api_key': api_key,
+        'X-Api-Key': api_key,
         'Content-Type': 'application/json'
     }
 
     url = "https://api.sam.gov/opportunities/v2/search"
     params = {
+        'api_version': 'v2',
         'postedFrom': today,
-        'limit': 10,  # Fetch top 10 contracts
+        'limit': 10,
         'sortBy': 'relevance',
-        'setAside': ['SBA', 'SDVOSB', '8A', 'HubZone', 'VOSB'],  # Small business set-asides
-        'active': 'true'
+        'setAsideType': ['SBA', 'SDVOSB', '8A', 'HUBZone', 'VOSB'],
+        'active': 'true',
+        'responseFormat': 'json'
     }
 
     try:
         logging.info('Fetching new contract opportunities from SAM.gov')
         response = requests.get(url, headers=headers, params=params)
+        
+        # Log response details for debugging
+        logging.info('SAM.gov API Response Status: %d', response.status_code)
+        logging.info('SAM.gov API Response Headers: %s', response.headers)
+        
         response.raise_for_status()
-        logging.info('Received response from SAM.gov API')
-        return response.json()['opportunityData']
+        data = response.json()
+        
+        if 'opportunityData' in data:
+            opportunities = data['opportunityData']
+            logging.info('Found %d contract opportunities', len(opportunities))
+            return opportunities
+        else:
+            logging.warning('No opportunities found in response: %s', data)
+            return []
+            
+    except requests.exceptions.RequestException as e:
+        logging.error('Error fetching contracts: %s', str(e))
+        if hasattr(e.response, 'text'):
+            logging.error('Response content: %s', e.response.text)
+        return []
     except Exception as e:
-        logging.error('Error fetching contracts: %s', e)
+        logging.error('Unexpected error fetching contracts: %s', str(e))
         return []
 
 def rank_contracts(contracts):
